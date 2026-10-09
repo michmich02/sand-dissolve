@@ -1,10 +1,22 @@
 # Sand Dissolve
 
-A browser-based interactive creative coding experiment by Michelle Guan.
+> A gesture-controlled particle transformation.
 
-## Live demo
+[**View live demo →**](https://michmich02.github.io/sand-dissolve/)
 
-https://michmich02.github.io/sand-dissolve/
+## Overview
+
+Sand Dissolve explores touch without a screen. Hand movement breaks a visual field into drifting particles, creating a direct connection between physical motion and a delicate digital material.
+
+## Interaction
+
+- Allow camera access.
+- Place a hand inside the camera frame.
+- Move through the scene to disturb and dissolve the particles.
+
+## Built with
+
+`JavaScript` · `MediaPipe` · `Canvas` · `Particle systems`
 
 ## Run locally
 
@@ -12,14 +24,10 @@ https://michmich02.github.io/sand-dissolve/
 python3 -m http.server 8000 --directory docs
 ```
 
-Open http://localhost:8000. Camera access requires localhost or HTTPS. Use a desktop browser and good lighting; allow camera or microphone access when the experience asks for it. External models and CDN scripts require internet access.
+Open [http://localhost:8000](http://localhost:8000) in a desktop browser. Camera and microphone APIs require localhost or HTTPS; external models and CDN dependencies require an internet connection.
 
-## Files
+## Design notes
 
-The root contains the project source. `docs/` contains the prepared static demo.
-
-## Publishing
-
-Enable GitHub Pages with **Deploy from a branch**, branch **main**, folder **/docs**.
-
-Camera, microphone and gesture behavior should be verified on the target device.
+- Immediate visual feedback keeps the gesture-to-effect relationship legible.
+- The experience is designed as a focused, full-screen interaction.
+- Processing happens in the browser; camera and microphone streams are not uploaded by this project.
