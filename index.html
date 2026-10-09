@@ -1,0 +1,656 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0, maximum-scale=1.0, user-scalable=no">
+    <title>Sand Dissolve - Particle Webcam FX</title>
+    <script src="https://cdn.jsdelivr.net/npm/@mediapipe/hands@0.4/hands.js" crossorigin="anonymous"></script>
+    <style>
+        :root {
+            --bg-color: #000000;
+            --text-color: #ffffff;
+        }
+
+        * {
+            margin: 0;
+            padding: 0;
+            box-sizing: border-box;
+            touch-action: manipulation;
+            -webkit-user-select: none;
+            user-select: none;
+            -webkit-touch-callout: none;
+        }
+
+        body, html {
+            width: 100%;
+            height: 100%;
+            overflow: hidden;
+            background-color: var(--bg-color);
+            font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, Helvetica, Arial, sans-serif;
+        }
+
+        canvas {
+            display: block;
+            width: 100vw;
+            height: 100vh;
+            object-fit: cover;
+        }
+
+        #ui-overlay {
+            position: absolute;
+            bottom: 40px;
+            left: 50%;
+            transform: translateX(-50%);
+            color: var(--text-color);
+            text-align: center;
+            pointer-events: none;
+            z-index: 10;
+            transition: opacity 0.5s ease;
+        }
+
+        .hint {
+            font-size: 18px;
+            letter-spacing: 2px;
+            text-transform: uppercase;
+            opacity: 0.6;
+            animation: pulse 2s infinite ease-in-out;
+        }
+
+        #gesture-msg {
+            font-size: 24px;
+            font-weight: 800;
+            color: #ffaa00;
+            margin-top: 12px;
+            letter-spacing: 4px;
+            text-shadow: 0 0 15px rgba(255, 170, 0, 0.6);
+            text-transform: uppercase;
+            transition: all 0.2s ease;
+        }
+
+        @keyframes pulse {
+            0%, 100% { opacity: 0.3; }
+            50% { opacity: 0.8; }
+        }
+
+        #status-msg {
+            position: absolute;
+            top: 50%;
+            left: 50%;
+            transform: translate(-50%, -50%);
+            color: white;
+            text-align: center;
+            z-index: 20;
+        }
+
+        .hidden {
+            display: none !important;
+        }
+    </style>
+</head>
+<body>
+
+    <div id="status-msg">Initializing Camera...</div>
+    
+    <div id="ui-overlay" class="hidden">
+        <p class="hint">OPEN HAND to snap</p>
+        <p id="gesture-msg"></p>
+    </div>
+
+    <canvas id="main-canvas"></canvas>
+
+    <script>
+        /**
+         * SAND DISSOLVE EFFECT
+         * A high-performance particle system using Canvas 2D
+         */
+
+        const canvas = document.getElementById('main-canvas');
+        const ctx = canvas.getContext('2d', { alpha: false });
+        const uiOverlay = document.getElementById('ui-overlay');
+        const statusMsg = document.getElementById('status-msg');
+
+        let video = document.createElement('video');
+        video.playsInline = true;
+        video.muted = true;
+        video.autoplay = true;
+
+        // Configuration
+        const GRID_SIZE = 5; // Distance between particles
+        const PARTICLE_RADIUS = 2.5;
+        const DISSOLVE_SPEED = 15; // Speed of the sweep line
+        const GRAVITY = 0.15;
+        const WIND = 0.1;
+        const REVERSE_WAVE_MULTIPLIER = 3; // Speed multiplier for the restore wave
+        const REVERSE_HOMING_SPEED = 0.02; // Homing acceleration for returning particles
+
+        // Physics State Modifiers
+        let currentGravity = GRAVITY;
+        let currentWind = WIND;
+        let currentDissolveSpeed = DISSOLVE_SPEED;
+        let isTimeStopped = false;
+        let isReversing = false;
+        let isSpreading = false;
+        let currentSpreadForce = 0;
+
+        // Hand Tracking State
+        let hands;
+        let handState = {
+            active: false,
+            numHands: 0,
+            openness: 1.5,
+            vx: 0,
+            vy: 0,
+            isPinch: false,
+            isSpread: false,
+            spreadForce: 0,
+            wasTogether: false
+        };
+        let prevPalm = null;
+        let prevHandDist = null;
+
+        let particles = [];
+        let width, height;
+        let isDissolving = false;
+        let sandHeights = [];
+        let numCols = 0;
+        let dissolveThreshold = 0;
+        let maxThreshold = 0;
+        let isTearing = false;
+        let tearThreshold = 0;
+        let animationFrameId;
+        let videoDataCanvas = document.createElement('canvas');
+        let videoDataCtx = videoDataCanvas.getContext('2d', { willReadFrequently: true });
+
+        class Particle {
+            constructor(x, y, color) {
+                this.originX = x;
+                this.originY = y;
+                this.x = x;
+                this.y = y;
+                this.color = color;
+                this.vx = (Math.random() - 0.5) * 2;
+                this.vy = (Math.random() - 0.5) * 2;
+                this.active = false;
+                this.isStopped = false;
+                // Pre-calculate score for TR to BL dissolve: 
+                // Top-right has high score, Bottom-left has low score
+                this.score = x + (height - y);
+            }
+
+            update() {
+                if (!this.active) return;
+                if (isTimeStopped) return; // Freeze in mid-air
+
+                // If reversing or spreading, give stopped particles a chance to detach
+                if (this.isStopped) {
+                    if (isReversing || isSpreading) {
+                        let col = Math.floor(this.x / GRID_SIZE);
+                        if (col >= 0 && col < numCols && Math.abs(this.y - sandHeights[col]) < GRID_SIZE * 4) {
+                            if (Math.random() > 0.4) { // Higher chance to detach
+                                this.isStopped = false;
+                                if (isReversing) {
+                                    this.vy = (Math.random() * -10) - 5;
+                                    this.vx = (Math.random() - 0.5) * 10;
+                                } else if (isSpreading) {
+                                    this.vy = (Math.random() * -5) - 2;
+                                    let dir = (this.x > width / 2) ? 1 : -1;
+                                    this.vx = dir * currentSpreadForce * 5 + (Math.random() - 0.5) * 5;
+                                }
+                                sandHeights[col] += GRID_SIZE * (0.4 + Math.random() * 0.5); // Restore height
+                            }
+                        }
+                    }
+                    return; // If still stopped, do nothing
+                }
+
+                if (isReversing) {
+                    // Homing behavior: pull back to original position
+                    let dx = this.originX - this.x;
+                    let dy = this.originY - this.y;
+                    let dist = Math.hypot(dx, dy);
+
+                    this.vx += dx * REVERSE_HOMING_SPEED;
+                    this.vy += dy * REVERSE_HOMING_SPEED;
+                    
+                    // Add some swirl for visual effect
+                    this.vx += (Math.random() - 0.5) * 2;
+                    this.vy += (Math.random() - 0.5) * 2;
+
+                    // Dampen speed
+                    this.vx *= 0.85;
+                    this.vy *= 0.85;
+
+                    this.x += this.vx;
+                    this.y += this.vy;
+
+                    // Lock back into place if threshold passed and close enough
+                    if (this.score < dissolveThreshold && dist < GRID_SIZE * 5) {
+                        this.x = this.originX;
+                        this.y = this.originY;
+                        this.active = false; // Deactivate so it updates color from webcam again
+                        this.vx = 0;
+                        this.vy = 0;
+                    }
+                } else {
+                    // Normal falling physics
+                    this.vy += currentGravity;
+                    // Add a gentle pull towards the center to build a central mound
+                    let centerPull = (width / 2 - this.x) * 0.0001; 
+                    this.vx += (Math.random() - 0.5) * 0.1 + centerPull + currentWind;
+                    
+                    // If strong wind (slap) is active, add turbulent scatter
+                    if (Math.abs(currentWind) > 10) {
+                        this.vy += (Math.random() - 0.5) * Math.abs(currentWind) * 0.4;
+                        this.vx += (Math.random() - 0.5) * Math.abs(currentWind) * 0.2;
+                    }
+                    
+                    if (isSpreading) {
+                        // Push away from center horizontally
+                        let dir = (this.x > width / 2) ? 1 : -1;
+                        this.vx += dir * currentSpreadForce;
+                        this.vy -= Math.random() * currentSpreadForce * 0.5;
+                    }
+
+                    this.x += this.vx;
+                    this.y += this.vy;
+
+                    // Clamp X to keep particles on screen and bounce slightly
+                    if (this.x < 0) { this.x = 0; this.vx *= -0.5; }
+                    if (this.x >= width) { this.x = width - 1; this.vx *= -0.5; }
+
+                    // Check collision with sand pile
+                    if (currentGravity > 0) {
+                        let col = Math.floor(this.x / GRID_SIZE);
+                        if (col < 0) col = 0;
+                        if (col >= numCols) col = numCols - 1;
+
+                        if (this.y >= sandHeights[col]) {
+                            let leftCol = col - 1;
+                            let rightCol = col + 1;
+                            let slideThreshold = GRID_SIZE * 0.8; // Angle of repose
+
+                            // Check if adjacent columns are deeper (higher Y value)
+                            let leftLower = leftCol >= 0 && (sandHeights[leftCol] - sandHeights[col]) > slideThreshold;
+                            let rightLower = rightCol < numCols && (sandHeights[rightCol] - sandHeights[col]) > slideThreshold;
+
+                            if (leftLower || rightLower) {
+                                // Roll down the slope visually
+                                if (leftLower && rightLower) {
+                                    if (sandHeights[leftCol] > sandHeights[rightCol]) {
+                                        this.x -= GRID_SIZE;
+                                        this.vx = -0.5;
+                                    } else {
+                                        this.x += GRID_SIZE;
+                                        this.vx = 0.5;
+                                    }
+                                } else if (leftLower) {
+                                    this.x -= GRID_SIZE;
+                                    this.vx = -0.5;
+                                } else {
+                                    this.x += GRID_SIZE;
+                                    this.vx = 0.5;
+                                }
+                                this.y = sandHeights[col] - 1;
+                                this.vy *= 0.3; // Dampen vertical speed slightly
+                            } else {
+                                // Settle completely
+                                this.y = sandHeights[col];
+                                this.isStopped = true;
+                                this.vx = 0;
+                                this.vy = 0;
+                                
+                                // Pile up with randomness for an uneven, realistic surface
+                                let drop = GRID_SIZE * (0.4 + Math.random() * 0.5);
+                                sandHeights[col] -= drop;
+                            }
+                        }
+                    }
+                }
+            }
+
+            draw(context) {
+                context.fillStyle = this.color;
+                context.globalAlpha = 1.0;
+                // Use fillRect for better performance with thousands of persistent particles
+                context.fillRect(this.x - PARTICLE_RADIUS, this.y - PARTICLE_RADIUS, PARTICLE_RADIUS * 2, PARTICLE_RADIUS * 2);
+            }
+        }
+
+        function showCameraError(msg) {
+            statusMsg.innerHTML = `
+                <div style="font-size:2rem">📷</div>
+                <p style="margin-top:10px">${msg}</p>
+                <p style="font-size:0.8rem; opacity:0.5">Please ensure camera access is allowed</p>
+            `;
+        }
+
+        function initHands() {
+            hands = new Hands({
+                locateFile: (file) => `https://cdn.jsdelivr.net/npm/@mediapipe/hands@0.4/${file}`
+            });
+            hands.setOptions({
+                maxNumHands: 2,
+                modelComplexity: 0, // Lower complexity for better performance
+                minDetectionConfidence: 0.5,
+                minTrackingConfidence: 0.5
+            });
+            
+            hands.onResults((results) => {
+                if (results.multiHandLandmarks && results.multiHandLandmarks.length > 0) {
+                    handState.active = true;
+                    handState.numHands = results.multiHandLandmarks.length;
+                    const lm = results.multiHandLandmarks[0];
+                    
+                    // Calculate palm center
+                    let palmX = (lm[0].x + lm[5].x + lm[9].x + lm[13].x + lm[17].x) / 5;
+                    let palmY = (lm[0].y + lm[5].y + lm[9].y + lm[13].y + lm[17].y) / 5;
+
+                    // Calculate velocity (Note: X is inverted because canvas mirrors video)
+                    if (prevPalm) {
+                        let dx = -(palmX - prevPalm.x);
+                        let dy = palmY - prevPalm.y;
+                        
+                        // Ignore huge jumps which happen when tracking is just acquired or switches hands
+                        if (Math.abs(dx) < 0.2 && Math.abs(dy) < 0.2) {
+                            // Exponential smoothing for velocity
+                            handState.vx = handState.vx * 0.7 + dx * 0.3;
+                            handState.vy = handState.vy * 0.7 + dy * 0.3;
+                        }
+                    }
+                    prevPalm = {x: palmX, y: palmY};
+
+                    // Calculate openness (distance from wrist to tips vs wrist to MCPs)
+                    let distTip = 0, distMcp = 0;
+                    [8, 12, 16, 20].forEach(i => distTip += Math.hypot(lm[i].x - lm[0].x, lm[i].y - lm[0].y));
+                    [5, 9, 13, 17].forEach(i => distMcp += Math.hypot(lm[i].x - lm[0].x, lm[i].y - lm[0].y));
+                    
+                    handState.openness = distTip / distMcp;
+                    
+                    // Calculate pinch (distance between thumb tip 4 and index tip 8)
+                    let pinchDist = Math.hypot(lm[8].x - lm[4].x, lm[8].y - lm[4].y);
+                    handState.isPinch = pinchDist < 0.06;
+                    
+                    // Auto-trigger dissolve if exactly one hand is open
+                    if (!isDissolving && handState.numHands === 1 && handState.openness > 1.5) {
+                        triggerDissolve();
+                    }
+
+                    // Auto-trigger an explosive wind swipe if it happens before dissolve starts 
+                    if (!isDissolving && handState.openness > 1.5 && Math.abs(handState.vx) > 0.015) {
+                        triggerDissolve();
+                        dissolveThreshold = -maxThreshold; // Instantly activate all particles
+                    }
+
+                    // Process two hands for Spread gesture
+                    if (results.multiHandLandmarks.length === 2) {
+                        const lm2 = results.multiHandLandmarks[1];
+                        let palmX1 = lm[0].x;
+                        let palmX2 = lm2[0].x;
+                        let dist = Math.abs(palmX1 - palmX2);
+
+                        // If hands are close together, set wasTogether flag
+                        if (dist < 0.15) {
+                            handState.wasTogether = true;
+                        }
+
+                        if (prevHandDist !== null) {
+                            let dDist = dist - prevHandDist;
+                            // Trigger ONLY if they were recently together AND are pulling apart
+                            if (handState.wasTogether && dDist > 0.003 && dist > 0.1) {
+                                handState.isSpread = true;
+                                handState.spreadForce = Math.max(1.5, Math.min(3.0, dist * 5));
+                            } else if (dDist <= 0 || dist > 0.4) {
+                                // If they stop pulling apart or get very far apart, reset
+                                if (dist > 0.4) handState.wasTogether = false; 
+                                handState.isSpread = false;
+                            }
+                        } else {
+                            // Tracking just recovered 2 hands. If they were together and are now apart, trigger
+                            if (handState.wasTogether && dist > 0.15) {
+                                handState.isSpread = true;
+                                handState.spreadForce = Math.max(1.5, Math.min(3.0, dist * 5));
+                            } else {
+                                handState.isSpread = false;
+                            }
+                        }
+                        prevHandDist = dist;
+
+                        // Auto-trigger an explosive spread if it happens before dissolve starts
+                        if (!isDissolving && handState.isSpread) {
+                            triggerDissolve();
+                            if (!isTearing) {
+                                isTearing = true;
+                                tearThreshold = 0;
+                            }
+                        }
+
+                    } else {
+                        // 1 hand detected: might be hands clasped together
+                        if (handState.numHands === 1) {
+                            handState.wasTogether = true;
+                        }
+                        handState.isSpread = false;
+                        prevHandDist = null;
+                    }
+                } else {
+                    handState.active = false;
+                    handState.numHands = 0;
+                    handState.vx *= 0.8;
+                    handState.vy *= 0.8;
+                    prevPalm = null;
+                    prevHandDist = null;
+                    handState.isPinch = false;
+                    handState.isSpread = false;
+                }
+            });
+
+            async function detect() {
+                if (video.readyState >= 2) {
+                    await hands.send({ image: video });
+                }
+                requestAnimationFrame(detect);
+            }
+            detect();
+        }
+
+        async function initCamera() {
+            if (!navigator.mediaDevices || !navigator.mediaDevices.getUserMedia) {
+                showCameraError('Camera API not supported');
+                return;
+            }
+
+            try {
+                const stream = await navigator.mediaDevices.getUserMedia({
+                    video: { 
+                        width: { ideal: 1280 }, 
+                        height: { ideal: 720 }, 
+                        facingMode: 'user' 
+                    }
+                });
+                video.srcObject = stream;
+                video.onloadedmetadata = () => {
+                    video.play();
+                    setupDimensions();
+                    statusMsg.classList.add('hidden');
+                    uiOverlay.classList.remove('hidden');
+                    createParticles();
+                    initHands(); // Start gesture recognition
+                    animate();
+                };
+            } catch (e) {
+                showCameraError(e.message);
+            }
+        }
+
+        function setupDimensions() {
+            width = window.innerWidth;
+            height = window.innerHeight;
+            canvas.width = width;
+            canvas.height = height;
+            
+            // Internal processing canvas size
+            videoDataCanvas.width = Math.floor(width / GRID_SIZE);
+            videoDataCanvas.height = Math.floor(height / GRID_SIZE);
+            
+            // Max threshold for the sweep (diagonal)
+            maxThreshold = width + height;
+            dissolveThreshold = maxThreshold;
+
+            // Initialize sand height map
+            numCols = Math.ceil(width / GRID_SIZE);
+            sandHeights = new Float32Array(numCols);
+            for(let i = 0; i < numCols; i++) {
+                sandHeights[i] = height;
+            }
+        }
+
+        function createParticles() {
+            particles = [];
+            const cols = videoDataCanvas.width;
+            const rows = videoDataCanvas.height;
+
+            for (let y = 0; y < rows; y++) {
+                for (let x = 0; x < cols; x++) {
+                    const px = x * GRID_SIZE + GRID_SIZE / 2;
+                    const py = y * GRID_SIZE + GRID_SIZE / 2;
+                    particles.push(new Particle(px, py, 'rgb(255,255,255)'));
+                }
+            }
+        }
+
+        function updateParticleColors() {
+            // Draw video to hidden canvas
+            videoDataCtx.save();
+            videoDataCtx.scale(-1, 1); // Mirror
+            videoDataCtx.translate(-videoDataCanvas.width, 0);
+            videoDataCtx.drawImage(video, 0, 0, videoDataCanvas.width, videoDataCanvas.height);
+            videoDataCtx.restore();
+
+            const imgData = videoDataCtx.getImageData(0, 0, videoDataCanvas.width, videoDataCanvas.height).data;
+            
+            for (let i = 0; i < particles.length; i++) {
+                const p = particles[i];
+                if (p.active || p.isStopped) continue; // Don't update color if it's flying or stopped
+
+                const idx = i * 4;
+                const r = imgData[idx];
+                const g = imgData[idx + 1];
+                const b = imgData[idx + 2];
+                p.color = `rgb(${r},${g},${b})`;
+            }
+        }
+
+        function triggerDissolve() {
+            if (isDissolving) return;
+            isDissolving = true;
+            document.querySelector('.hint').style.display = 'none'; // Hide hint, keep gesture text
+        }
+
+        function animate() {
+            ctx.fillStyle = '#000000';
+            ctx.fillRect(0, 0, width, height);
+
+            // Always update colors for particles that haven't dissolved yet
+            updateParticleColors();
+            
+            // --- Process Hand Gestures & Physics ---
+            currentGravity = GRAVITY;
+            currentWind = WIND;
+            
+            // By default, time flows normally
+            isTimeStopped = false;
+            currentDissolveSpeed = DISSOLVE_SPEED;
+            
+            isReversing = false;
+            isSpreading = false;
+            currentSpreadForce = 0;
+            let uiText = "";
+
+            if (handState.active && isDissolving) {
+                if (handState.isSpread) {
+                    isSpreading = true;
+                    currentSpreadForce = handState.spreadForce;
+                    uiText = "SPREAD: DUAL STORM";
+                    // Start tearing from top to bottom
+                    if (!isTearing) {
+                        isTearing = true;
+                        tearThreshold = 0;
+                    }
+                } else if (handState.isPinch) {
+                    currentGravity = -GRAVITY * 3;
+                    isReversing = true;
+                    uiText = "PINCH: RESTORE REALITY (3X)";
+                } else if (handState.openness > 1.5 && Math.abs(handState.vx) > 0.015) {
+                    // Swipe (Wind) - Requires open palm AND moderate speed
+                    currentWind = handState.vx > 0 ? 25 : -25; 
+                    uiText = handState.vx > 0 ? "SWIPE: RIGHT WIND" : "SWIPE: LEFT WIND";
+                } else if (handState.openness > 1.5) {
+                    // Open hand: speed up dissolve
+                    let openFactor = Math.max(0, handState.openness - 1.5);
+                    currentDissolveSpeed = DISSOLVE_SPEED * (1 + openFactor * 2.5);
+                    uiText = "OPEN: ACCELERATE";
+                }
+            }
+            
+            const gestureMsg = document.getElementById('gesture-msg');
+            if (gestureMsg.innerText !== uiText) {
+                gestureMsg.innerText = uiText;
+            }
+            // ---------------------------------------
+
+            if (isDissolving && !isTimeStopped) {
+                if (isReversing) {
+                    isTearing = false;
+                    dissolveThreshold += DISSOLVE_SPEED * REVERSE_WAVE_MULTIPLIER; // Rewind the dissolve wave
+                    if (dissolveThreshold >= maxThreshold) {
+                        dissolveThreshold = maxThreshold;
+                        isDissolving = false; // Fully restored
+                        document.querySelector('.hint').style.display = 'block';
+                    }
+                } else {
+                    dissolveThreshold -= currentDissolveSpeed;
+                    if (isTearing) {
+                        tearThreshold += 45; // Fast top-to-bottom tear (~750ms to cross screen)
+                    }
+                }
+            }
+
+            let allStopped = true;
+
+            for (let i = 0; i < particles.length; i++) {
+                const p = particles[i];
+
+                if (isDissolving && !p.active && !p.isStopped) {
+                    // Activate particles that are beyond the threshold, or above the tear line
+                    if (p.score > dissolveThreshold || (isTearing && p.y < tearThreshold)) {
+                        p.active = true;
+                    }
+                }
+
+                p.update();
+                p.draw(ctx);
+                
+                if (!p.isStopped) allStopped = false;
+            }
+
+            if (isDissolving && allStopped) {
+                // Effect finished, leave the sand pile on screen
+                cancelAnimationFrame(animationFrameId);
+                return;
+            }
+
+            animationFrameId = requestAnimationFrame(animate);
+        }
+
+        // Listeners
+        window.addEventListener('resize', () => {
+            setupDimensions();
+            if (!isDissolving) createParticles();
+        });
+
+        // Start
+        initCamera();
+
+    </script>
+</body>
+</html>
