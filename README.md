@@ -1,33 +1,27 @@
 # Sand Dissolve
 
-> A gesture-controlled particle transformation.
+Turn your webcam image into drifting particles, then bring it back together.
 
-[**View live demo →**](https://michmich02.github.io/sand-dissolve/)
+[Live demo ↗](https://michmich02.github.io/sand-dissolve/) · [Michelle Guan](https://github.com/michmich02)
 
-## Overview
+## Try it
 
-Sand Dissolve explores touch without a screen. Hand movement breaks a visual field into drifting particles, creating a direct connection between physical motion and a delicate digital material.
+Allow camera access and show one open hand to trigger the dissolve. Move your hand to influence the particles, spread two hands apart to scatter them, or pinch to accelerate their return.
 
-## Interaction
+## How it works
 
-- Allow camera access.
-- Place a hand inside the camera frame.
-- Move through the scene to disturb and dissolve the particles.
+Canvas 2D samples the webcam image into colored particles. Hand openness, pinch distance, velocity, and two-hand separation change the forces applied to those particles.
 
-## Built with
+**Stack:** JavaScript, Canvas 2D, MediaPipe Hands.
 
-`JavaScript` · `MediaPipe` · `Canvas` · `Particle systems`
+The camera setup, gesture detection, particle simulation, and rendering are all in [index.html](index.html).
 
 ## Run locally
+
+From the repository root:
 
 ```sh
 python3 -m http.server 8000 --directory docs
 ```
 
-Open [http://localhost:8000](http://localhost:8000) in a desktop browser. Camera and microphone APIs require localhost or HTTPS; external models and CDN dependencies require an internet connection.
-
-## Design notes
-
-- Immediate visual feedback keeps the gesture-to-effect relationship legible.
-- The experience is designed as a focused, full-screen interaction.
-- Processing happens in the browser; camera and microphone streams are not uploaded by this project.
+Open [localhost:8000](http://localhost:8000). Use localhost or HTTPS for camera access. Tracking models and CDN scripts need an internet connection.
